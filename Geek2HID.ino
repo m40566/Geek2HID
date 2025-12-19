@@ -1,4 +1,3 @@
-#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
@@ -7,10 +6,8 @@
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
 
-#include <SPI.h>
 #include "LCD_Driver.h"
 #include "GUI_Paint.h"
-#include "image.h"
 
 // =======================================================
 // USB HID
