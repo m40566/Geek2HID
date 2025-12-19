@@ -1149,8 +1149,6 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
 // Arduino
 // =======================================================
 void setup() {
-  Serial.begin(115200);
-  delay(800);
 
   hidKeyboard.begin();
   hidMouse.begin();
