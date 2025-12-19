@@ -251,7 +251,6 @@ void startWifi() {
   if (S.apMode) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(S.apSsid, (strlen(S.apPass) >= 8) ? S.apPass : nullptr);
-    Serial.printf("WIFI: AP SSID=%s IP=%s\n", S.apSsid, WiFi.softAPIP().toString().c_str());
     lcdDrawStatus();
     return;
   }
@@ -259,14 +258,12 @@ void startWifi() {
   WiFi.mode(WIFI_STA);
 
   if (strlen(S.staSsid) == 0) {
-    Serial.println("WIFI: STA not configured, fallback AP");
     S.apMode = true;
     saveSettings();
     startWifi();
     return;
   }
 
-  Serial.printf("WIFI: STA connecting SSID=%s\n", S.staSsid);
   WiFi.begin(S.staSsid, S.staPass);
 
   uint32_t start = millis();
@@ -275,12 +272,10 @@ void startWifi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("WIFI: STA connected SSID=%s IP=%s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
     lcdDrawStatus();
     return;
   }
 
-  Serial.println("WIFI: STA failed, fallback AP");
   S.apMode = true;
   saveSettings();
   startWifi();
@@ -1174,7 +1169,6 @@ void setup() {
   ws.begin();
   ws.onEvent(onWsEvent);
 
-  Serial.println("READY: / (control) and /settings");
 }
 
 void loop() {
