@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
@@ -6,8 +7,11 @@
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
 
+#include <SPI.h>
 #include "LCD_Driver.h"
 #include "GUI_Paint.h"
+#include "image.h"
+#include "USB.h"
 
 // =======================================================
 // USB HID
@@ -251,6 +255,7 @@ void startWifi() {
   if (S.apMode) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(S.apSsid, (strlen(S.apPass) >= 8) ? S.apPass : nullptr);
+    Serial.printf("WIFI: AP SSID=%s IP=%s\n", S.apSsid, WiFi.softAPIP().toString().c_str());
     lcdDrawStatus();
     return;
   }
@@ -258,12 +263,14 @@ void startWifi() {
   WiFi.mode(WIFI_STA);
 
   if (strlen(S.staSsid) == 0) {
+    Serial.println("WIFI: STA not configured, fallback AP");
     S.apMode = true;
     saveSettings();
     startWifi();
     return;
   }
 
+  Serial.printf("WIFI: STA connecting SSID=%s\n", S.staSsid);
   WiFi.begin(S.staSsid, S.staPass);
 
   uint32_t start = millis();
@@ -272,10 +279,12 @@ void startWifi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WIFI: STA connected SSID=%s IP=%s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
     lcdDrawStatus();
     return;
   }
 
+  Serial.println("WIFI: STA failed, fallback AP");
   S.apMode = true;
   saveSettings();
   startWifi();
@@ -1144,7 +1153,10 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
 // Arduino
 // =======================================================
 void setup() {
+  Serial.begin(115200);
+  delay(800);
 
+  USB.begin();
   hidKeyboard.begin();
   hidMouse.begin();
 
@@ -1169,6 +1181,7 @@ void setup() {
   ws.begin();
   ws.onEvent(onWsEvent);
 
+  Serial.println("READY: / (control) and /settings");
 }
 
 void loop() {
