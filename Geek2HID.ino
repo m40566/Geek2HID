@@ -43,7 +43,6 @@ struct Settings {
 // =======================================================
 // Scroll simulation state (human reading)
 // =======================================================
-volatile bool gSimEnabled = false;   // UI toggle
 volatile bool gSimActive  = false;   // Engage/Stop
 volatile uint8_t gSimSpeed = 6;      // 1..20 (aggressiveness)
 
@@ -74,9 +73,7 @@ static inline uint32_t simRandRange(uint32_t lo, uint32_t hi) {
 // Throttle LCD redraws to state changes
 uint8_t gLastLcdSimState = 255;
 static uint8_t getSimUiState() {
-  if (!gSimEnabled) return 0;        // OFF
-  if (!gSimActive)  return 1;        // READY
-  return 2;                           // ACTIVE
+  return gSimActive ? 1 : 0; // 0=OFF, 1=ACTIVE
 }
 
 // =======================================================
@@ -231,10 +228,8 @@ void lcdDrawStatus() {
     Paint_DrawString_EN(10, 75, ip.c_str(), &Font16, BLACK, WHITE);
   }
 
-  UWORD color = 0x7BEF; // gray
-  const char* label = "ScrollSim: OFF";
-  if (st == 1) { color = WHITE; label = "ScrollSim: READY"; }
-  if (st == 2) { color = GREEN; label = "ScrollSim: ACTIVE"; }
+    UWORD color = gSimActive ? GREEN : 0x7BEF; // green when active, gray when off
+  const char* label = gSimActive ? "ScrollSim: ACTIVE" : "ScrollSim: OFF";
   Paint_DrawString_EN(10, 110, label, &Font16, BLACK, color);
 
   Paint_DrawString_EN(10, 135, "/settings", &Font16, BLACK, WHITE);
@@ -580,11 +575,6 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
   </div>
 
   <div id="bar" style="padding-top:0;">
-    <div class="toggleRow">
-      <input id="simEnable" type="checkbox">
-      <label for="simEnable" style="font-weight:700;">Scroll simulation</label>
-    </div>
-
     <label for="simSpeed" class="small">Speed</label>
     <input id="simSpeed" type="range" min="1" max="20" step="1" value="6" style="width:180px;">
     <span id="simSpeedV" class="small" style="min-width:40px; display:inline-block;">6</span>
@@ -606,6 +596,10 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
     conn.textContent = "Connected";
     conn.classList.remove('bad');
     conn.classList.add('ok');
+      // Ensure device sim is stopped on page load/reconnect
+    send({t:'sim', speed: Number(simSpeed.value)});
+    send({t:'sim', active:false});
+    simState.textContent = "Sim: OFF";
   };
   ws.onclose = ()=>{
     conn.textContent = "Disconnected";
@@ -621,27 +615,10 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
   live.checked = (localStorage.getItem('liveKeys') === '1');
   live.addEventListener('change', ()=>{
     localStorage.setItem('liveKeys', live.checked ? '1' : '0');
-  });
-
-  const simEnable = document.getElementById('simEnable');
-  const simSpeed = document.getElementById('simSpeed');
+  });  const simSpeed = document.getElementById('simSpeed');
   const simSpeedV = document.getElementById('simSpeedV');
-  const simState = document.getElementById('simState');
-
-  simEnable.checked = (localStorage.getItem('simEnable') === '1');
-  simSpeed.value = localStorage.getItem('simSpeed') || '6';
+  const simState = document.getElementById('simState');  simSpeed.value = localStorage.getItem('simSpeed') || '6';
   simSpeedV.textContent = simSpeed.value;
-
-  simEnable.addEventListener('change', ()=>{
-    localStorage.setItem('simEnable', simEnable.checked ? '1' : '0');
-    send({t:'sim', enable: simEnable.checked});
-    if(!simEnable.checked){
-      simState.textContent = "Sim: OFF";
-      send({t:'sim', active:false});
-    } else {
-      simState.textContent = "Sim: Enabled";
-    }
-  });
 
   simSpeed.addEventListener('input', ()=>{
     simSpeedV.textContent = simSpeed.value;
@@ -650,16 +627,16 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
   });
 
   function simEngage(){
-    if(!simEnable.checked){
-      simEnable.checked = true;
-      simEnable.dispatchEvent(new Event('change'));
-    }
+    simState.textContent = "Sim: ACTIVE";
+    send({t:'sim', active:true, speed: Number(simSpeed.value)});
+  }
     simState.textContent = "Sim: ACTIVE";
     send({t:'sim', active:true, speed: Number(simSpeed.value)});
   }
   function simStop(){
-    simState.textContent = simEnable.checked ? "Sim: Enabled" : "Sim: OFF";
+    simState.textContent = "Sim: OFF";
     send({t:'sim', active:false});
+  });
   }
 
   let lastX=null, lastY=null;
@@ -993,19 +970,22 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
 
   String msg((char*)payload, length);
 
-  // Scroll simulation control
+  // Scroll simulation control (Engage/Stop only)
   if (msg.indexOf("\"t\":\"sim\"") >= 0) {
-    if (msg.indexOf("\"enable\":true") >= 0) gSimEnabled = true;
-    if (msg.indexOf("\"enable\":false") >= 0) { gSimEnabled = false; simStopHuman(); }
-
-    if (msg.indexOf("\"active\":true") >= 0) { if (gSimEnabled) simStartHuman(); }
-    if (msg.indexOf("\"active\":false") >= 0) simStopHuman();
-
+    // Optional speed update
     int si = msg.indexOf("\"speed\":");
     if (si >= 0) {
       uint8_t sp = (uint8_t)msg.substring(si + 8).toInt();
       gSimSpeed = (uint8_t)constrain((int)sp, 1, 20);
     }
+
+    // Engage/Stop
+    if (msg.indexOf("\"active\":true") >= 0)  simStartHuman();
+    if (msg.indexOf("\"active\":false") >= 0) simStopHuman();
+
+    lcdDrawStatus();
+    return;
+  }
 
     lcdDrawStatus();
     return;
@@ -1185,7 +1165,7 @@ void loop() {
   ws.loop();
 
   // Human-like scroll simulation (uses same logic as scroll buttons)
-  if (gSimEnabled && gSimActive) {
+  if (gSimActive) {
     uint32_t now = millis();
 
     if (simNextChangeMs != 0 && (int32_t)(now - simNextChangeMs) >= 0) {
