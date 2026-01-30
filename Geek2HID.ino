@@ -648,17 +648,49 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
     conn.textContent = "Connected";
     conn.classList.remove('bad');
     conn.classList.add('ok');
-      // Ensure device sim is stopped on page load/reconnect
-    send({t:'sim', speed: Number(simSpeed.value)});
-    send({t:'sim', active:false});
-    simState.textContent = "Sim: OFF";
+    // Ask device for current state (do NOT change it on connect)
+    requestSimState();
   };
   ws.onclose = ()=>{
     conn.textContent = "Disconnected";
     conn.classList.remove('ok');
     conn.classList.add('bad');
   };
+
+  ws.onmessage = (e)=>{
+    try{
+      const m = JSON.parse(e.data);
+      if(m && m.t === 'sim'){
+        if(typeof m.speed === 'number'){
+          el('simSpeed').value = m.speed;
+          el('simSpeedVal').textContent = m.speed;
+        }
+        if(typeof m.active === 'boolean'){
+          setSimUI(m.active);
+        }
+      }
+    }catch(err){}
+  };
+
   function send(obj){ if(ws.readyState===1) ws.send(JSON.stringify(obj)); }
+  let simActive = false;
+
+  function setSimUI(active){
+    simActive = !!active;
+    const b = el('btnSimToggle');
+    b.textContent = simActive ? 'Stop' : 'Engage';
+    // optional: visually warn when active
+    if(simActive){ b.classList.add('danger'); } else { b.classList.remove('danger'); }
+  }
+
+  function requestSimState(){
+    send({t:'sim', cmd:'get'});
+  }
+
+  function toggleSim(){
+    send({t:'sim', active: !simActive, speed: parseInt(el('simSpeed').value,10)});
+  }
+
 
   const pad = document.getElementById('pad');
   const text = document.getElementById('text');
@@ -1014,12 +1046,24 @@ void handleReboot() {
 // WebSocket handler
 // =======================================================
 void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  // When a browser connects, immediately push current sim state so UI doesn't reset it.
+  if (type == WStype_CONNECTED) {
+    sendSimStateToClient(num);
+    return;
+  }
+
   if (type != WStype_TEXT) return;
 
   String msg((char*)payload, length);
 
   // Scroll simulation control (Engage/Stop only)
   if (msg.indexOf("\"t\":\"sim\"") >= 0) {
+    // State request
+    if (msg.indexOf("\"cmd\":\"get\"") >= 0) {
+      sendSimStateToClient(num);
+      return;
+    }
+
     // Optional speed update
     int si = msg.indexOf("\"speed\":");
     if (si >= 0) {
@@ -1032,6 +1076,7 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     if (msg.indexOf("\"active\":false") >= 0) simStopHuman();
 
     lcdDrawStatus();
+    broadcastSimState();
     return;
   }
 
