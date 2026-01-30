@@ -27,6 +27,10 @@ WebSocketsServer ws(81);
 // =======================================================
 Preferences prefs;
 
+String buildSimStateJson();
+void broadcastSimState();
+void sendSimStateToClient(uint8_t num);
+
 struct Settings {
   bool apMode = true; // true=AP, false=STA
 
@@ -204,6 +208,7 @@ void simStartHuman() {
   simInitIfNeeded();
   gSimActive = true;
   simSchedulePause(); // start with a pause
+  broadcastSimState();
 }
 
 void simStopHuman() {
@@ -212,7 +217,31 @@ void simStopHuman() {
   simTicksLeft = 0;
   simNextChangeMs = 0;
   simNextTickMs = 0;
+  broadcastSimState();
 }
+
+
+// Build a consistent sim state JSON payload for UI sync
+String buildSimStateJson() {
+  String s = "{\"t\":\"sim\",\"active\":";
+  s += (gSimActive ? "true" : "false");
+  s += ",\"speed\":";
+  s += String(gSimSpeed);
+  s += "}";
+  return s;
+}
+
+void broadcastSimState() {
+  // Broadcast to all connected WS clients so UI stays in sync with physical button toggles
+  String payload = buildSimStateJson();
+  ws.broadcastTXT(payload);
+}
+
+void sendSimStateToClient(uint8_t num) {
+  String payload = buildSimStateJson();
+  ws.sendTXT(num, payload);
+}
+
 
 // Toggle sim scroll via hardware button
 void onHwButtonClick() {
