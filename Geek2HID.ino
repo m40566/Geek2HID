@@ -630,13 +630,9 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
     simState.textContent = "Sim: ACTIVE";
     send({t:'sim', active:true, speed: Number(simSpeed.value)});
   }
-    simState.textContent = "Sim: ACTIVE";
-    send({t:'sim', active:true, speed: Number(simSpeed.value)});
-  }
   function simStop(){
     simState.textContent = "Sim: OFF";
     send({t:'sim', active:false});
-  });
   }
 
   let lastX=null, lastY=null;
@@ -987,9 +983,6 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     return;
   }
 
-    lcdDrawStatus();
-    return;
-  }
 
   // Tap to click
   if (msg.indexOf("\"t\":\"tap\"") >= 0) {
