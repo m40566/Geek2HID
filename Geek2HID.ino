@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <Preferences.h>
+#include <OneButton.h>
 
 #include "USBHIDKeyboard.h"
 #include "USBHIDMouse.h"
@@ -45,6 +46,16 @@ struct Settings {
 // =======================================================
 volatile bool gSimActive  = false;   // Engage/Stop
 volatile uint8_t gSimSpeed = 6;      // 1..20 (aggressiveness)
+
+// =======================================================
+// Hardware button (toggle sim scroll)
+// =======================================================
+#ifndef PIN_INPUT
+#define PIN_INPUT 0   // Waveshare BOOT button (active-low)
+#endif
+
+OneButton hwBtn(PIN_INPUT, true);
+static uint32_t gLastBtnToggleMs = 0;
 
 enum SimState { SIM_PAUSE, SIM_BURST };
 SimState simState = SIM_PAUSE;
@@ -201,6 +212,18 @@ void simStopHuman() {
   simTicksLeft = 0;
   simNextChangeMs = 0;
   simNextTickMs = 0;
+}
+
+// Toggle sim scroll via hardware button
+void onHwButtonClick() {
+  uint32_t now = millis();
+  if (now - gLastBtnToggleMs < 250) return; // debounce/guard
+  gLastBtnToggleMs = now;
+
+  if (gSimActive) simStopHuman();
+  else            simStartHuman();
+
+  lcdDrawStatus();
 }
 
 // =======================================================
@@ -1136,6 +1159,10 @@ void setup() {
   Paint_SetRotate(90);
   LCD_Clear(BLACK);
 
+  // Hardware button (BOOT) toggles sim scroll
+  pinMode(PIN_INPUT, INPUT_PULLUP);
+  hwBtn.attachClick([](){ onHwButtonClick(); });
+
   loadSettings();
   startWifi();
 
@@ -1156,6 +1183,7 @@ void setup() {
 void loop() {
   http.handleClient();
   ws.loop();
+  hwBtn.tick();
 
   // Human-like scroll simulation (uses same logic as scroll buttons)
   if (gSimActive) {
