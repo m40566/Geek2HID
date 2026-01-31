@@ -306,35 +306,42 @@ void onHwButtonClick() {
 }
 
 // =======================================================
-// LCD status
+// LCD status - Enhanced visual feedback
 // =======================================================
 void lcdDrawStatus() {
   uint8_t st = getSimUiState();
   if (st == gLastLcdSimState) return;
   gLastLcdSimState = st;
 
-  LCD_Clear(BLACK);
+  // Green background when simulation is active, black when off
+  UWORD bgColor = gSimActive ? 0x07E0 : BLACK;  // Full green
+  LCD_Clear(bgColor);
+
+  UWORD textColor = gSimActive ? BLACK : WHITE;  // Black text on green, white text on black
 
   if (S.apMode) {
-    Paint_DrawString_EN(10, 20, "AP Mode", &Font20, BLACK, WHITE);
+    Paint_DrawString_EN(5, 10, "Access Point", &Font16, bgColor, textColor);
     String ip = WiFi.softAPIP().toString();
-    Paint_DrawString_EN(10, 55, ip.c_str(), &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(5, 30, ip.c_str(), &Font16, bgColor, textColor);
   } else {
-    Paint_DrawString_EN(10, 20, "STA Mode", &Font20, BLACK, WHITE);
-
+    Paint_DrawString_EN(5, 10, "WiFi Client", &Font16, bgColor, textColor);
+    
     String ssid = WiFi.SSID();
-    if (ssid.length() == 0) ssid = "(no ssid)";
-    Paint_DrawString_EN(10, 55, ssid.c_str(), &Font16, BLACK, WHITE);
+    if (ssid.length() == 0) ssid = "(disconnected)";
+    if (ssid.length() > 20) ssid = ssid.substring(0, 20);  // Truncate long SSIDs
+    Paint_DrawString_EN(5, 30, ssid.c_str(), &Font16, bgColor, textColor);
 
     String ip = WiFi.localIP().toString();
-    Paint_DrawString_EN(10, 75, ip.c_str(), &Font16, BLACK, WHITE);
+    Paint_DrawString_EN(5, 50, ip.c_str(), &Font16, bgColor, textColor);
   }
 
-  UWORD color = gSimActive ? GREEN : 0x7BEF; // green when active, gray when off
-  const char* label = gSimActive ? "ScrollSim: ACTIVE" : "ScrollSim: OFF";
-  Paint_DrawString_EN(10, 110, label, &Font16, BLACK, color);
+  // Large, prominent simulation status
+  const char* statusLabel = gSimActive ? "SCROLL: ACTIVE" : "Scroll: Off";
+  UWORD statusColor = gSimActive ? BLACK : 0x7BEF;  // Black on green bg, or gray on black bg
+  Paint_DrawString_EN(5, 75, statusLabel, &Font20, bgColor, statusColor);
 
-  Paint_DrawString_EN(10, 135, "/settings", &Font16, BLACK, WHITE);
+  // Settings URL at bottom
+  Paint_DrawString_EN(5, 105, "Web: /settings", &Font16, bgColor, textColor);
 }
 
 // =======================================================
@@ -644,10 +651,42 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no"/>
   <style>
-    body { font-family: -apple-system, Arial; margin: 0; padding: 0; background:#0b0b0b; color:#eee; }
-    #top { padding: 10px; display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    * { box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, Arial; 
+      margin: 0; 
+      padding: 0; 
+      background:#0b0b0b; 
+      color:#eee;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    #top { 
+      padding: 8px 10px; 
+      display:flex; 
+      justify-content:space-between; 
+      align-items:center; 
+      gap:8px;
+      flex-shrink: 0;
+    }
+    .topLeft { display: flex; flex-direction: column; gap: 2px; }
+    .title { font-size:16px; font-weight:800; line-height: 1.2; }
+    .status {
+      font-weight: 700;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid #333;
+      display:inline-block;
+    }
+    .ok { color:#7CFC98; border-color:#7CFC98; }
+    .bad { color:#FF5A5A; border-color:#FF5A5A; }
+    .hint { font-size: 10px; opacity:.7; line-height: 1.3; }
+    
     #pad {
-      height: 40vh;
+      flex: 1;
       background: #111;
       border-top:1px solid #222;
       border-bottom:1px solid #222;
@@ -657,40 +696,112 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
       touch-action:none;
       user-select:none;
       -webkit-user-select:none;
+      min-height: 0;
     }
-    #bar { padding: 10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    button, input, label { font-size: 16px; }
+    
+    #controls { 
+      padding: 8px 10px; 
+      display:flex; 
+      gap:6px; 
+      flex-wrap:wrap; 
+      align-items:center;
+      flex-shrink: 0;
+    }
+    
+    button, input, label { font-size: 14px; }
     button, input {
-      padding: 10px; border-radius:12px; border:1px solid #333; background:#151515; color:#eee;
+      padding: 8px 10px; 
+      border-radius:10px; 
+      border:1px solid #333; 
+      background:#151515; 
+      color:#eee;
     }
-    input[type="text"] { flex: 1; min-width: 180px; background:#0f0f0f; }
-    .small { font-size: 13px; opacity:.85; }
-    .status {
-      font-weight: 800;
-      font-size: 14px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      border: 1px solid #333;
-      display:inline-block;
+    button { cursor: pointer; white-space: nowrap; }
+    button:active { background:#0a0a0a; }
+    
+    input[type="text"] { flex: 1; min-width: 140px; background:#0f0f0f; }
+    
+    .toggleRow { display:flex; align-items:center; gap:6px; }
+    .toggleRow input[type="checkbox"] { width: 18px; height: 18px; margin: 0; }
+    .toggleRow label { font-weight:600; font-size:13px; }
+    
+    /* Simulation controls - single line layout */
+    #simBar {
+      padding: 8px 10px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: #0a0a0a;
+      border-bottom: 1px solid #222;
+      flex-shrink: 0;
     }
-    .ok { color:#7CFC98; }
-    .bad { color:#FF5A5A; }
+    #simBar label { font-size: 12px; margin: 0; opacity: .8; }
+    #simSpeed { 
+      flex: 1; 
+      min-width: 80px;
+      max-width: 150px;
+    }
+    #simSpeedV { 
+      font-size: 12px; 
+      opacity: .8; 
+      min-width: 30px;
+      text-align: center;
+    }
+    #toggleSim {
+      font-weight: 700;
+      min-width: 80px;
+    }
+    #toggleSim.active {
+      background: #0d4d0d;
+      border-color: #7CFC98;
+      color: #7CFC98;
+    }
+    #simStateLabel {
+      font-size: 11px;
+      font-weight: 700;
+      opacity: .7;
+      min-width: 70px;
+    }
+    #simStateLabel.active {
+      color: #7CFC98;
+      opacity: 1;
+    }
 
-    .toggleRow { display:flex; align-items:center; gap:8px; }
-    .toggleRow input[type="checkbox"] { width: 22px; height: 22px; margin: 0; }
-
-    .kbdWrap { padding: 10px; padding-top: 0; }
-    .row { display:flex; gap:8px; margin-bottom:8px; }
+    .settingsBtn {
+      padding: 6px 12px;
+      font-size: 13px;
+    }
+    
+    /* Keyboard toggle */
+    #kbdToggle {
+      width: 100%;
+      padding: 6px;
+      font-size: 12px;
+      background: #0a0a0a;
+      border: 1px solid #222;
+      margin-bottom: 4px;
+    }
+    
+    .kbdWrap { 
+      padding: 6px 10px; 
+      padding-top: 0;
+      flex-shrink: 0;
+      display: none;
+    }
+    .kbdWrap.visible { display: block; }
+    
+    .row { display:flex; gap:4px; margin-bottom:4px; }
     .key {
       flex:1;
-      padding: 12px 0;
+      padding: 10px 0;
       text-align:center;
-      border-radius:12px;
+      border-radius:8px;
       border:1px solid #333;
       background:#151515;
       user-select:none;
       -webkit-user-select:none;
       touch-action:manipulation;
+      font-size: 13px;
     }
     .key.wide  { flex: 1.7; }
     .key.wider { flex: 2.4; }
@@ -700,45 +811,44 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
 </head>
 <body>
   <div id="top">
-    <div>
-      <div style="font-size:18px;font-weight:800;">GeekHID Control</div>
+    <div class="topLeft">
+      <div class="title">GeekHID</div>
       <div id="conn" class="status bad">Disconnected</div>
-      <div class="small">Tap = left click • Long-press = right click</div>
+      <div class="hint">Tap=click • Hold=right</div>
     </div>
-    <button onclick="location.href='/settings'">Settings</button>
+    <button class="settingsBtn" onclick="location.href='/settings'">Settings</button>
+  </div>
+
+  <div id="simBar">
+    <label for="simSpeed">Speed</label>
+    <input id="simSpeed" type="range" min="1" max="20" step="1" value="6">
+    <span id="simSpeedV">6</span>
+    <button id="toggleSim" onclick="toggleSim()">Start</button>
+    <span id="simStateLabel">OFF</span>
   </div>
 
   <div id="pad">Touchpad</div>
 
-  <div id="bar">
+  <div id="controls">
     <button onclick="send({t:'click', b:1})">Left</button>
     <button onclick="send({t:'click', b:2})">Right</button>
-    <button onclick="send({t:'scroll', d:+1})">Scroll Up</button>
-    <button onclick="send({t:'scroll', d:-1})">Scroll Down</button>
+    <button onclick="send({t:'scroll', d:+1})">⬆</button>
+    <button onclick="send({t:'scroll', d:-1})">⬇</button>
 
-    <input id="text" type="text" placeholder="Type here (Enter sends)"
+    <input id="text" type="text" placeholder="Type here"
       autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false"/>
 
     <div class="toggleRow">
       <input id="live" type="checkbox">
-      <label for="live" style="font-weight:700;">Live keys</label>
+      <label for="live">Live</label>
     </div>
 
     <button onclick="sendText()">Send</button>
   </div>
 
-  <div id="bar" style="padding-top:0;">
-    <label for="simSpeed" class="small">Speed</label>
-    <input id="simSpeed" type="range" min="1" max="20" step="1" value="6" style="width:180px;">
-    <span id="simSpeedV" class="small" style="min-width:40px; display:inline-block;">6</span>
-
-    <button onclick="simEngage()">Engage</button>
-    <button onclick="simStop()">Stop</button>
-
-    <span id="simState" class="small">Sim: OFF</span>
-  </div>
-
-  <div class="kbdWrap">
+  <button id="kbdToggle" onclick="toggleKeyboard()">Show Keyboard ⌨️</button>
+  
+  <div class="kbdWrap" id="kbdWrap">
     <div id="kbd"></div>
   </div>
 
@@ -749,7 +859,6 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
     conn.textContent = "Connected";
     conn.classList.remove('bad');
     conn.classList.add('ok');
-    // Ask device for current state (do NOT change it on connect)
     requestSimState();
   };
   ws.onclose = ()=>{
@@ -789,8 +898,23 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
 
   function setSimUI(active){
     simActive = !!active;
-    const state = document.getElementById('simState');
-    state.textContent = simActive ? 'Sim: ACTIVE' : 'Sim: OFF';
+    const btn = document.getElementById('toggleSim');
+    const label = document.getElementById('simStateLabel');
+    
+    btn.textContent = simActive ? 'Stop' : 'Start';
+    label.textContent = simActive ? 'ACTIVE' : 'OFF';
+    
+    if (simActive) {
+      btn.classList.add('active');
+      label.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+      label.classList.remove('active');
+    }
+  }
+
+  function toggleSim(){
+    send({t:'sim', active: !simActive, speed: parseInt(document.getElementById('simSpeed').value, 10)});
   }
 
   function requestSimState(){
@@ -808,7 +932,6 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
 
   const simSpeed = document.getElementById('simSpeed');
   const simSpeedV = document.getElementById('simSpeedV');
-  const simState = document.getElementById('simState');
 
   simSpeed.value = localStorage.getItem('simSpeed') || '6';
   simSpeedV.textContent = simSpeed.value;
@@ -819,13 +942,18 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
     send({t:'sim', speed: Number(simSpeed.value)});
   });
 
-  function simEngage(){
-    simState.textContent = "Sim: ACTIVE";
-    send({t:'sim', active:true, speed: Number(simSpeed.value)});
+  // Keyboard toggle
+  function toggleKeyboard() {
+    const wrap = document.getElementById('kbdWrap');
+    const btn = document.getElementById('kbdToggle');
+    const isVisible = wrap.classList.toggle('visible');
+    btn.textContent = isVisible ? 'Hide Keyboard ⌨️' : 'Show Keyboard ⌨️';
+    localStorage.setItem('kbdVisible', isVisible ? '1' : '0');
   }
-  function simStop(){
-    simState.textContent = "Sim: OFF";
-    send({t:'sim', active:false});
+
+  // Restore keyboard visibility
+  if (localStorage.getItem('kbdVisible') === '1') {
+    toggleKeyboard();
   }
 
   let lastX=null, lastY=null;
