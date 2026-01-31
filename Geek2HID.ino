@@ -11,6 +11,22 @@
 #include "USB.h"
 
 // =======================================================
+// CONSTANTS
+// =======================================================
+#ifndef PIN_INPUT
+#define PIN_INPUT 0   // Waveshare BOOT button (active-low)
+#endif
+
+// Timing constants
+const uint32_t DEBOUNCE_MS = 250;
+const uint32_t LONG_PRESS_MS = 600;
+const uint32_t TAP_THRESHOLD_MS = 250;
+const uint32_t CLICK_DELAY_MS = 10;
+
+// WebSocket message buffer size
+const size_t WS_MSG_BUFFER = 512;
+
+// =======================================================
 // USB HID
 // =======================================================
 USBHIDKeyboard hidKeyboard;
@@ -54,10 +70,6 @@ volatile uint8_t gSimSpeed = 6;      // 1..20 (aggressiveness)
 // =======================================================
 // Hardware button (toggle sim scroll)
 // =======================================================
-#ifndef PIN_INPUT
-#define PIN_INPUT 0   // Waveshare BOOT button (active-low)
-#endif
-
 OneButton hwBtn(PIN_INPUT, true);
 static uint32_t gLastBtnToggleMs = 0;
 
@@ -141,19 +153,57 @@ void hidMouseMove(int dx, int dy) {
 }
 void hidMouseClick(uint8_t buttonMask) {
   hidMouse.press(buttonMask);
-  delay(10);
+  delay(CLICK_DELAY_MS);
   hidMouse.release(buttonMask);
 }
 void hidMouseScroll(int8_t wheel) {
   wheel = constrain(wheel, -127, 127);
-  hidMouse.move(0, 0, wheel); // known-working path (manual buttons)
+  hidMouse.move(0, 0, wheel);
 }
 
-// ✅ Shared scroll path for both buttons and simulation
+// Shared scroll path for both buttons and simulation
 void applyScrollSteps(int steps) {
   int wheel = (int)(steps * S.scrollSensitivity);
   wheel = constrain(wheel, -127, 127);
   hidMouseScroll((int8_t)wheel);
+}
+
+// =======================================================
+// Shift character mapping table
+// =======================================================
+struct ShiftMap {
+  char normal;
+  char shifted;
+};
+
+const ShiftMap shiftTable[] = {
+  {'1', '!'}, {'2', '@'}, {'3', '#'}, {'4', '$'}, {'5', '%'},
+  {'6', '^'}, {'7', '&'}, {'8', '*'}, {'9', '('}, {'0', ')'},
+  {'-', '_'}, {'=', '+'}, {'[', '{'}, {']', '}'}, {'\\', '|'},
+  {';', ':'}, {'\'', '"'}, {',', '<'}, {'.', '>'}, {'/', '?'},
+  {'`', '~'}
+};
+
+char getShiftedChar(char c) {
+  // Handle lowercase to uppercase
+  if (c >= 'a' && c <= 'z') {
+    return c - 32;
+  }
+  
+  // Handle uppercase (already shifted)
+  if (c >= 'A' && c <= 'Z') {
+    return c;
+  }
+  
+  // Look up in shift table
+  for (size_t i = 0; i < sizeof(shiftTable) / sizeof(ShiftMap); i++) {
+    if (shiftTable[i].normal == c) {
+      return shiftTable[i].shifted;
+    }
+  }
+  
+  // No mapping found, return as-is
+  return c;
 }
 
 // =======================================================
@@ -220,10 +270,11 @@ void simStopHuman() {
   broadcastSimState();
 }
 
-
 // Build a consistent sim state JSON payload for UI sync
 String buildSimStateJson() {
-  String s = "{\"t\":\"sim\",\"active\":";
+  String s;
+  s.reserve(64); // Pre-allocate to reduce fragmentation
+  s = "{\"t\":\"sim\",\"active\":";
   s += (gSimActive ? "true" : "false");
   s += ",\"speed\":";
   s += String(gSimSpeed);
@@ -242,11 +293,10 @@ void sendSimStateToClient(uint8_t num) {
   ws.sendTXT(num, payload);
 }
 
-
 // Toggle sim scroll via hardware button
 void onHwButtonClick() {
   uint32_t now = millis();
-  if (now - gLastBtnToggleMs < 250) return; // debounce/guard
+  if (now - gLastBtnToggleMs < DEBOUNCE_MS) return; // debounce guard
   gLastBtnToggleMs = now;
 
   if (gSimActive) simStopHuman();
@@ -280,7 +330,7 @@ void lcdDrawStatus() {
     Paint_DrawString_EN(10, 75, ip.c_str(), &Font16, BLACK, WHITE);
   }
 
-    UWORD color = gSimActive ? GREEN : 0x7BEF; // green when active, gray when off
+  UWORD color = gSimActive ? GREEN : 0x7BEF; // green when active, gray when off
   const char* label = gSimActive ? "ScrollSim: ACTIVE" : "ScrollSim: OFF";
   Paint_DrawString_EN(10, 110, label, &Font16, BLACK, color);
 
@@ -288,49 +338,84 @@ void lcdDrawStatus() {
 }
 
 // =======================================================
-// WiFi start
+// WiFi start (improved to avoid recursion)
 // =======================================================
 void startWifi() {
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
   delay(200);
 
-  if (S.apMode) {
+  bool shouldUseAP = S.apMode;
+  
+  // Try STA mode if configured
+  if (!shouldUseAP) {
+    if (strlen(S.staSsid) == 0) {
+      Serial.println("WIFI: STA not configured, using AP");
+      shouldUseAP = true;
+      S.apMode = true;
+      saveSettings();
+    } else {
+      WiFi.mode(WIFI_STA);
+      Serial.printf("WIFI: STA connecting SSID=%s\n", S.staSsid);
+      WiFi.begin(S.staSsid, S.staPass);
+
+      uint32_t start = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        delay(250);
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("WIFI: STA connected SSID=%s IP=%s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+        lcdDrawStatus();
+        return;
+      }
+      
+      Serial.println("WIFI: STA failed, fallback to AP");
+      shouldUseAP = true;
+      S.apMode = true;
+      saveSettings();
+    }
+  }
+  
+  // Use AP mode
+  if (shouldUseAP) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(S.apSsid, (strlen(S.apPass) >= 8) ? S.apPass : nullptr);
     Serial.printf("WIFI: AP SSID=%s IP=%s\n", S.apSsid, WiFi.softAPIP().toString().c_str());
     lcdDrawStatus();
-    return;
   }
+}
 
-  WiFi.mode(WIFI_STA);
-
-  if (strlen(S.staSsid) == 0) {
-    Serial.println("WIFI: STA not configured, fallback AP");
-    S.apMode = true;
-    saveSettings();
-    startWifi();
-    return;
+// =======================================================
+// JSON sanitization helper
+// =======================================================
+String jsonEscape(const String& str) {
+  String result;
+  result.reserve(str.length() + 16);
+  
+  for (size_t i = 0; i < str.length(); i++) {
+    char c = str[i];
+    switch (c) {
+      case '"':  result += "\\\""; break;
+      case '\\': result += "\\\\"; break;
+      case '\b': result += "\\b"; break;
+      case '\f': result += "\\f"; break;
+      case '\n': result += "\\n"; break;
+      case '\r': result += "\\r"; break;
+      case '\t': result += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          // Control characters - escape as unicode
+          char buf[8];
+          snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+          result += buf;
+        } else {
+          result += c;
+        }
+        break;
+    }
   }
-
-  Serial.printf("WIFI: STA connecting SSID=%s\n", S.staSsid);
-  WiFi.begin(S.staSsid, S.staPass);
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(250);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("WIFI: STA connected SSID=%s IP=%s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
-    lcdDrawStatus();
-    return;
-  }
-
-  Serial.println("WIFI: STA failed, fallback AP");
-  S.apMode = true;
-  saveSettings();
-  startWifi();
+  return result;
 }
 
 // =======================================================
@@ -443,27 +528,32 @@ static const char SETTINGS_HTML[] PROGMEM = R"HTML(
 
   async function load(){
     setStatus("Loading...");
-    const r = await fetch('/api/settings');
-    const j = await r.json();
+    try {
+      const r = await fetch('/api/settings');
+      const j = await r.json();
 
-    mode.value = j.apMode ? "ap" : "sta";
-    apSsid.value = j.apSsid || "";
-    apPass.value = j.apPass || "";
+      mode.value = j.apMode ? "ap" : "sta";
+      apSsid.value = j.apSsid || "";
+      apPass.value = j.apPass || "";
 
-    staSsid.innerHTML = "";
-    const opt = document.createElement('option');
-    opt.value = j.staSsid || "";
-    opt.textContent = j.staSsid || "(not set)";
-    staSsid.appendChild(opt);
+      staSsid.innerHTML = "";
+      const opt = document.createElement('option');
+      opt.value = j.staSsid || "";
+      opt.textContent = j.staSsid || "(not set)";
+      staSsid.appendChild(opt);
 
-    staPass.value = j.staPass || "";
+      staPass.value = j.staPass || "";
 
-    sens.value = j.sensitivity || 1.0;
-    scroll.value = j.scrollSensitivity || 1.0;
-    tap.checked = !!j.tapToClick;
+      sens.value = j.sensitivity || 1.0;
+      scroll.value = j.scrollSensitivity || 1.0;
+      tap.checked = !!j.tapToClick;
 
-    refreshLabels();
-    setStatus("Loaded.", true);
+      refreshLabels();
+      setStatus("Loaded.", true);
+    } catch (e) {
+      setStatus("Failed to load settings.");
+      console.error(e);
+    }
   }
 
   async function scan(){
@@ -493,6 +583,7 @@ static const char SETTINGS_HTML[] PROGMEM = R"HTML(
       scanStatus.textContent = "Scan complete.";
     }catch(e){
       scanStatus.textContent = "Scan failed.";
+      console.error(e);
     }finally{
       staSsid.disabled = false;
     }
@@ -511,23 +602,33 @@ static const char SETTINGS_HTML[] PROGMEM = R"HTML(
       tapToClick: tap.checked
     };
 
-    const r = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
 
-    if(r.ok){
-      setStatus("Saved. Rebooting...", true);
-      await fetch('/api/reboot', { method:'POST' });
-    }else{
+      if(r.ok){
+        setStatus("Saved. Rebooting...", true);
+        await fetch('/api/reboot', { method:'POST' });
+      }else{
+        setStatus("Save failed.");
+      }
+    } catch (e) {
       setStatus("Save failed.");
+      console.error(e);
     }
   }
 
   async function reboot(){
     setStatus("Rebooting...");
-    await fetch('/api/reboot', { method:'POST' });
+    try {
+      await fetch('/api/reboot', { method:'POST' });
+    } catch (e) {
+      // Expected to fail as device reboots
+      console.log("Reboot initiated");
+    }
   }
 
   load();
@@ -662,35 +763,39 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
       const m = JSON.parse(e.data);
       if(m && m.t === 'sim'){
         if(typeof m.speed === 'number'){
-          el('simSpeed').value = m.speed;
-          el('simSpeedVal').textContent = m.speed;
+          document.getElementById('simSpeed').value = m.speed;
+          document.getElementById('simSpeedV').textContent = m.speed;
         }
         if(typeof m.active === 'boolean'){
           setSimUI(m.active);
         }
       }
-    }catch(err){}
+    }catch(err){
+      console.error('WebSocket message parse error:', err);
+    }
   };
 
-  function send(obj){ if(ws.readyState===1) ws.send(JSON.stringify(obj)); }
+  function send(obj){ 
+    if(ws.readyState===1) {
+      try {
+        ws.send(JSON.stringify(obj));
+      } catch (e) {
+        console.error('WebSocket send error:', e);
+      }
+    }
+  }
+  
   let simActive = false;
 
   function setSimUI(active){
     simActive = !!active;
-    const b = el('btnSimToggle');
-    b.textContent = simActive ? 'Stop' : 'Engage';
-    // optional: visually warn when active
-    if(simActive){ b.classList.add('danger'); } else { b.classList.remove('danger'); }
+    const state = document.getElementById('simState');
+    state.textContent = simActive ? 'Sim: ACTIVE' : 'Sim: OFF';
   }
 
   function requestSimState(){
     send({t:'sim', cmd:'get'});
   }
-
-  function toggleSim(){
-    send({t:'sim', active: !simActive, speed: parseInt(el('simSpeed').value,10)});
-  }
-
 
   const pad = document.getElementById('pad');
   const text = document.getElementById('text');
@@ -699,9 +804,13 @@ static const char CONTROL_HTML[] PROGMEM = R"HTML(
   live.checked = (localStorage.getItem('liveKeys') === '1');
   live.addEventListener('change', ()=>{
     localStorage.setItem('liveKeys', live.checked ? '1' : '0');
-  });  const simSpeed = document.getElementById('simSpeed');
+  });
+
+  const simSpeed = document.getElementById('simSpeed');
   const simSpeedV = document.getElementById('simSpeedV');
-  const simState = document.getElementById('simState');  simSpeed.value = localStorage.getItem('simSpeed') || '6';
+  const simState = document.getElementById('simState');
+
+  simSpeed.value = localStorage.getItem('simSpeed') || '6';
   simSpeedV.textContent = simSpeed.value;
 
   simSpeed.addEventListener('input', ()=>{
@@ -929,12 +1038,15 @@ void handleRoot() { http.send_P(200, "text/html", CONTROL_HTML); }
 void handleSettingsPage() { http.send_P(200, "text/html", SETTINGS_HTML); }
 
 void handleGetSettings() {
-  String json = "{";
+  String json;
+  json.reserve(256);
+  
+  json = "{";
   json += "\"apMode\":" + String(S.apMode ? "true" : "false") + ",";
-  json += "\"apSsid\":\"" + String(S.apSsid) + "\",";
-  json += "\"apPass\":\"" + String(S.apPass) + "\",";
-  json += "\"staSsid\":\"" + String(S.staSsid) + "\",";
-  json += "\"staPass\":\"" + String(S.staPass) + "\",";
+  json += "\"apSsid\":\"" + jsonEscape(String(S.apSsid)) + "\",";
+  json += "\"apPass\":\"" + jsonEscape(String(S.apPass)) + "\",";
+  json += "\"staSsid\":\"" + jsonEscape(String(S.staSsid)) + "\",";
+  json += "\"staPass\":\"" + jsonEscape(String(S.staPass)) + "\",";
   json += "\"sensitivity\":" + String(S.sensitivity, 3) + ",";
   json += "\"scrollSensitivity\":" + String(S.scrollSensitivity, 3) + ",";
   json += "\"tapToClick\":" + String(S.tapToClick ? "true" : "false");
@@ -1014,18 +1126,18 @@ void handleScan() {
 
   int n = WiFi.scanNetworks(false, true);
 
-  String json = "{ \"networks\": [";
+  String json;
+  json.reserve(512);
+  json = "{ \"networks\": [";
+  
   for (int i = 0; i < n; i++) {
     if (i) json += ",";
     String ssid = WiFi.SSID(i);
     int rssi = WiFi.RSSI(i);
     bool open = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
 
-    ssid.replace("\\", "\\\\");
-    ssid.replace("\"", "\\\"");
-
     json += "{";
-    json += "\"ssid\":\"" + ssid + "\",";
+    json += "\"ssid\":\"" + jsonEscape(ssid) + "\",";
     json += "\"rssi\":" + String(rssi) + ",";
     json += "\"open\":" + String(open ? "true" : "false");
     json += "}";
@@ -1053,6 +1165,9 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
   }
 
   if (type != WStype_TEXT) return;
+  
+  // Validate message size
+  if (length == 0 || length > WS_MSG_BUFFER) return;
 
   String msg((char*)payload, length);
 
@@ -1080,7 +1195,6 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     return;
   }
 
-
   // Tap to click
   if (msg.indexOf("\"t\":\"tap\"") >= 0) {
     if (S.tapToClick) hidMouseClick(0x01);
@@ -1103,49 +1217,11 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     bool modAlt   = (msg.indexOf("\"alt\":true")   >= 0);
     bool modMeta  = (msg.indexOf("\"meta\":true")  >= 0);
 
-    // Apply modifiers (best-effort)
+    // Apply modifiers
     if (modCtrl)  hidKeyboard.press(KEY_LEFT_CTRL);
     if (modAlt)   hidKeyboard.press(KEY_LEFT_ALT);
     if (modMeta)  hidKeyboard.press(KEY_LEFT_GUI);
     if (modShift) hidKeyboard.press(KEY_LEFT_SHIFT);
-
-    auto sendCharWithShiftMap = [&](char c){
-      // If shift is held, map common US keyboard symbols
-      if (!modShift) {
-        hidKeyboard.write((uint8_t)c);
-        return;
-      }
-      if (c >= 'a' && c <= 'z') { hidKeyboard.write((uint8_t)(c - 32)); return; } // to upper
-      if (c >= 'A' && c <= 'Z') { hidKeyboard.write((uint8_t)c); return; }
-
-      switch (c) {
-        case '1': hidKeyboard.write((uint8_t)'!'); return;
-        case '2': hidKeyboard.write((uint8_t)'@'); return;
-        case '3': hidKeyboard.write((uint8_t)'#'); return;
-        case '4': hidKeyboard.write((uint8_t)'$'); return;
-        case '5': hidKeyboard.write((uint8_t)'%'); return;
-        case '6': hidKeyboard.write((uint8_t)'^'); return;
-        case '7': hidKeyboard.write((uint8_t)'&'); return;
-        case '8': hidKeyboard.write((uint8_t)'*'); return;
-        case '9': hidKeyboard.write((uint8_t)'('); return;
-        case '0': hidKeyboard.write((uint8_t)')'); return;
-        case '-': hidKeyboard.write((uint8_t)'_'); return;
-        case '=': hidKeyboard.write((uint8_t)'+'); return;
-        case '[': hidKeyboard.write((uint8_t)'{'); return;
-        case ']': hidKeyboard.write((uint8_t)'}'); return;
-        case '\\': hidKeyboard.write((uint8_t)'|'); return;
-        case ';': hidKeyboard.write((uint8_t)':'); return;
-        case '\'': hidKeyboard.write((uint8_t)'"'); return;
-        case ',': hidKeyboard.write((uint8_t)'<'); return;
-        case '.': hidKeyboard.write((uint8_t)'>'); return;
-        case '/': hidKeyboard.write((uint8_t)'?'); return;
-        case '`': hidKeyboard.write((uint8_t)'~'); return;
-        default:
-          // For anything else, just send the char as-is.
-          hidKeyboard.write((uint8_t)c);
-          return;
-      }
-    };
 
     if (key == "backspace") {
       hidKeyboard.write(KEY_BACKSPACE);
@@ -1158,7 +1234,11 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     } else if (key == "space") {
       hidKeyboard.write((uint8_t)' ');
     } else if (key.length() == 1) {
-      sendCharWithShiftMap(key[0]);
+      char c = key[0];
+      if (modShift) {
+        c = getShiftedChar(c);
+      }
+      hidKeyboard.write((uint8_t)c);
     }
 
     // Release modifiers
@@ -1169,7 +1249,6 @@ void onWsEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
 
     return;
   }
-
 
   // Mouse move
   if (msg.indexOf("\"t\":\"move\"") >= 0) {
@@ -1270,7 +1349,7 @@ void loop() {
     }
 
     if (simState == SIM_BURST && simTicksLeft > 0 && (int32_t)(now - simNextTickMs) >= 0) {
-      applyScrollSteps(simDir); // ✅ shared path
+      applyScrollSteps(simDir);
       simTicksLeft--;
       simNextTickMs = millis() + simRandRange(350, 700);
 
